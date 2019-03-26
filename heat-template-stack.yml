@@ -176,10 +176,6 @@ resources:
           user_data_format: RAW
           user_data:
             get_resource: server_init
-          block_device_mapping_v2:
-            - delete_on_termination: false
-              volume_size: { get_param: worker_disk_size }
-              image: { get_param: image }
 
   server_init:
     type: OS::Heat::CloudConfig
