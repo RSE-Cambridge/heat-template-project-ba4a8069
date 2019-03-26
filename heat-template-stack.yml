@@ -1,0 +1,217 @@
+heat_template_version: 2016-10-14
+description: >
+  HOT template to create a new neutron network plus a router to the public
+  network, and for deploying one controller server and 8 worker servers into the new network. The template 
+  also assigns floating IP addresses to the controller so it are routable from the public network.
+
+parameters:
+  public_key:
+    type: string
+    label: Public Key
+    description: Public key to be used for all instances 
+    default: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDlj2Em91Y1juqqX0FpEBSpVWfr54yi7tvndQjYx7BmYqlrQKjjEAE7QiC8kAAJD90ot9MQI/RL8SqzmUeP9x/vQijcu3jnmng1hvcjdwgH9t67mDd8Hv0rN35jthCXTtuVpVoEzZ+7v7INXNKBlSkhO4ML0Nr+38BE9puJ7RBwnlzRqj4OtMU2rLSxchvhLTyczwC7O7FJkc8VThhb1IO7WtvE5AoQ/CKdheBk4YZhV1fGunwlxe/Oo4TJ5vCM7nzn3yjEaf0kKaUF0+2RA+V0i15Ez4ho07K6Q67ECHrW2R8tw6OOTDatCKnbCQIeDa1kd9jYs3zIakSIdOIx6apZ jtoa2"
+
+  image:
+    default: "CentOS-7-x86_64-GenericCloud"
+    type: string
+    description: Name of image to use for servers
+    constraints:
+      - allowed_values:
+        - CentOS-7-x86_64-GenericCloud
+  public_cdir:
+    default: "0.0.0.0/0"
+    type: string
+    description: Public CDIR to allow access to the controller server
+
+  ctrl_flavor:
+    default: C1.hphi.small
+    type: string
+    description: Flavor to use for the controller
+    constraints:
+      - allowed_values:
+        - C1.hphi.small
+
+  controller_volume:
+    type: number
+    label: Controller_Volume
+    description: This is the unique ID of the Volume. You can get it from the Horizon dashboard properties.
+
+  worker_flavor:
+    default: C1.hphi.small
+    type: string
+    description: Flavor to use for workers
+    constraints:
+      - allowed_values:
+        - C1.hphi.small
+
+  worker_count:
+    type: number
+    label: Workers
+    description: Number of workers
+    default: 8
+
+  user:
+    default: centos
+    type: string
+    description: Default user
+
+  provider_network:
+    default: "CUDN-Private"
+    type: string
+    description: Provider Network
+
+resources:
+  ssh_key:
+    type: OS::Nova::KeyPair
+    properties:
+      name: { get_param: "OS::stack_id" }
+      public_key: { get_param: public_key }
+
+  controller_sg:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      rules:
+        - protocol: tcp
+          remote_ip_prefix: 0.0.0.0/0
+          port_range_min: 22
+          port_range_max: 22
+        - protocol: icmp
+          remote_ip_prefix: 0.0.0.0/0
+        - protocol: tcp
+          remote_ip_prefix: 0.0.0.0/0
+          port_range_min: 80
+          port_range_max: 80
+        - protocol: tcp
+          remote_ip_prefix: 0.0.0.0/0
+          port_range_min: 443
+          port_range_max: 443
+
+  worker_sg:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      rules:
+        - protocol: tcp
+          remote_ip_prefix: 0.0.0.0/0
+          port_range_min: 22
+          port_range_max: 22
+        - protocol: icmp
+          remote_ip_prefix: 0.0.0.0/0
+
+  internal_sg:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      rules:
+        - protocol: tcp
+          remote_group_id: { get_resource: internal_sg }
+          port_range_min: 1 
+          port_range_max: 65535
+        - protocol: udp
+          remote_group_id: { get_resource: internal_sg }
+          port_range_min: 1 
+          port_range_max: 65535
+        - protocol: icmp
+          remote_ip_prefix: 0.0.0.0/0
+
+  private_net:
+    type: OS::Neutron::Net
+    properties:
+      name: "internal-network"
+
+  private_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      name: "subnet1"
+      network_id: { get_resource: private_net }
+      cidr: "10.0.0.0/24"
+      dns_nameservers: ["8.8.8.8"]
+      allocation_pools:
+        - start: 10.0.0.10
+          end: 10.0.0.200
+
+  router:
+    type: OS::Neutron::Router
+    properties:
+      name: "Router"
+      external_gateway_info:
+        network: { get_param: provider_network }
+
+  router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: router }
+      subnet_id: { get_resource: private_subnet }
+
+  controller:
+    type: "OS::Nova::Server"
+    properties:
+      name: "Web Server"
+      flavor: { get_param: flavor }
+      image: { get_param: image }
+      key_name: { get_resource: ssh_key }
+      security_groups:
+         - { get_resource: server_sg }
+      networks:
+        - network: {get_resource: private_net}
+      user_data_format: RAW
+      user_data:
+        get_resource: server_init
+
+  workers:
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: { get_param: worker_count }
+      resource_def:
+        type: OS::Nova::Server
+        properties:
+          key_name: { get_resource: ssh_key }
+          flavor: { get_param: worker_flavor }
+          name:
+            str_replace: 
+              template: worker-%index%
+          networks:
+            - network: {get_resource: private_net}
+          security_groups:
+            - { get_resource: worker_sg }
+            - { get_resource: internal_sg }
+          user_data_format: RAW
+          user_data:
+            get_resource: server_init
+          block_device_mapping_v2:
+            - delete_on_termination: false
+              volume_size: { get_param: worker_disk_size }
+              image: { get_param: image }
+
+  server_init:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config:
+        package_update: true
+        packages:
+        - vim
+        - epel-release
+
+  ctrl_volume_att:
+     type: OS::Cinder::VolumeAttachment
+     properties:
+       instance_uuid: { get_resource: controller }
+       volume_id: { get_param: controller_volume }
+
+  floating_ip_association:
+    type: OS::Nova::FloatingIPAssociation
+    properties:
+      floating_ip: { get_resource: floating_ip }
+      server_id: { get_resource: server }
+
+  floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: provider_network }
+  
+outputs:
+  controller_public_ip:
+    description: Floating IP address of server in public network
+    value: { get_attr: [ floating_ip, floating_ip_address ] }
+  ssh_private_key:
+    description: The private key to access instance (you need to format to get work properly)
+    value:
+      get_attr: [ssh_key, private_key]
